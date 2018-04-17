@@ -1,0 +1,44 @@
+#!/bin/bash
+# Check_MK agent for multiple MySQL instances
+# it looks for directories in /home ending with "db" and containing a .my.cnf file
+
+if which mysqladmin > /dev/null
+then
+  databases=$(for name in $(ls /home/ | egrep 'db$'); do if [[ -e /home/$name/.my.cnf ]]; then echo $name; fi; done)
+
+  if [ "$databases" ]; then
+
+    # Check if mysqld is running and accessible
+    echo "<<<mysql_ping_multi>>>"
+    for database in $databases; do
+      # remove "db" from the end of the name
+      name=$(echo $database | sed -e 's/db$//')
+      mysqladmin --defaults-file=/home/$database/.my.cnf ping 2>&1 | cut -d$'\n' -f1 | sed "s@^@$name @"
+    done
+
+   # gather stats
+    echo "<<<mysql_multi>>>"
+    for database in $databases; do
+      name=$(echo $database | sed -e 's/db$//')
+      pid=$(pgrep -u $database -x mysqld)
+      # this is a sneaky trick to get the untruncated innodb status output:
+      fd=$(lsof -n -P -p $pid | grep deleted | head -1 | awk '{print $4}' | tr -d 'u')
+      mysql --defaults-file=/home/$database/.my.cnf -sN \
+        -e "show global status; show global variables;" | sed "s@^@$name @"
+      mysql --defaults-file=/home/$database/.my.cnf -ss \
+        -e "show slave status\G" | awk -F: '/:/{gsub(/ /, "", $1); print $1 $2}' | sed "s@^@$name @"
+      mysql --defaults-file=/home/$database/.my.cnf -sN \
+        -e "show master logs;" 2>/dev/null | sed -e 's/^.*\.\([0-9]*\)/binlog-\1/' | sed "s@^@$name @"
+      mysql --defaults-file=/home/$database/.my.cnf -sN \
+        -e "show processlist;" | sed -e 's/^/process\t/' | sed "s@^@$name @"
+      innodb_output=$(mysql --defaults-file=/home/$database/.my.cnf -sN \
+        -e "show engine innodb status\G" | sed "s@^@$name @")
+      case "$innodb_output" in
+        *"END OF INNODB MONITOR OUTPUT"* ) echo "$innodb_output";;
+        * ) cat /proc/$pid/fd/$fd | sed "s@^@$name @"
+      esac
+    done
+
+  fi
+fi
+
