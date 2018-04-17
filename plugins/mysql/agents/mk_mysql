@@ -1,6 +1,6 @@
 #!/bin/bash
 
-if which mysqladmin > /dev/null
+if which mysqladmin > /dev/null && which mysqld_safe > /dev/null
 then
   echo "<<<mysql_ping>>>"
   mysqladmin --defaults-extra-file=$MK_CONFDIR/mysql.cfg ping 2>&1
