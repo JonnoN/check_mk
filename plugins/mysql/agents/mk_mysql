@@ -1,0 +1,21 @@
+#!/bin/bash
+
+if which mysqladmin > /dev/null
+then
+  echo "<<<mysql_ping>>>"
+  mysqladmin --defaults-extra-file=$MK_CONFDIR/mysql.cfg ping 2>&1
+
+  echo "<<<mysql>>>"
+  mysql --defaults-extra-file=$MK_CONFDIR/mysql.cfg -sN \
+     -e "show global status; show global variables;"
+  mysql --defaults-extra-file=$MK_CONFDIR/mysql.cfg -ss \
+     -e "show slave status\G" | awk -F: '/:/{gsub(/ /, "", $1); print $1 $2}'
+  mysql --defaults-extra-file=$MK_CONFDIR/mysql.cfg -sN \
+     -e "show master logs;" 2>/dev/null | sed -e 's/^.*\.\([0-9]*\)/binlog-\1/'
+  mysql --defaults-extra-file=$MK_CONFDIR/mysql.cfg -sN \
+     -e "show processlist;" | sed -e 's/^/process\t/'
+  mysql --defaults-extra-file=$MK_CONFDIR/mysql.cfg -sN \
+     -e "show engine innodb status\G"
+
+fi
+
