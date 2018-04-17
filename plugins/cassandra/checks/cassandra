@@ -1,0 +1,172 @@
+#!/usr/bin/python
+# -*- encoding: utf-8; py-indent-offset: 4 -*-
+import re
+
+def inventory_cassandra(info):
+#    print info
+    for line in info:
+        if line[0] == 'ID':
+            return [(None, {})]
+
+def parse_cassandra(info):
+    values = {}
+    bytes_regex = '.?bytes.?'
+    for line in info:
+        # Heap Memory (MB) : 419.67 / 998.44
+        if line[0] == 'Heap' and line[1] == 'Memory':
+            values['heap_mem_used_mb'] = float(line[4])
+            values['heap_mem_total_mb'] = float(line[6])
+
+        # Key Cache : entries 0, size 0 (bytes), capacity 0 (bytes), 0 hits, 0 requests, 0.977 recent hit rate, 14400 save period in seconds
+        # Key Cache : entries 56790, size 57.97 MB, capacity 95 MB, 13643737 hits, 28430383 requests, 0.480 recent hit rate, 14400 save period in seconds
+        elif line[0] == 'Key' and line[1] == 'Cache' and line[3] == 'entries':
+            values['key_cache_entries'] = int(line[4].strip(','))
+            if line[7] == 'MB': values['key_cache_used'] = int(float(line[6])*1024*1024)
+            if re.match(bytes_regex, line[7]): values['key_cache_used'] = int(line[6])
+            if line[10] == 'MB': values['key_cache_size'] = int(float(line[9])*1024*1024)
+            if re.match(bytes_regex, line[10]): values['key_cache_size'] = int(line[9])
+            values['key_cache_hits'] = int(line[11])
+            values['key_cache_requests'] = int(line[13])
+            values['key_cache_efficiency'] = float(line[15]) if line[15] != 'NaN' else 0
+
+        # Key Cache : size 3957072 (bytes), capacity 51380224 (bytes), 6711142 hits, 6713227 requests, 1.000 recent hit rate, 14400 save period in seconds
+        elif line[0] == 'Key' and line[1] == 'Cache' and line[3] == 'size':
+            values['key_cache_entries'] = 0
+            values['key_cache_used'] = int(line[4])
+            values['key_cache_size'] = int(line[7])
+            values['key_cache_hits'] = int(line[9])
+            values['key_cache_requests'] = int(line[11])
+            values['key_cache_efficiency'] = float(line[13]) if line[13] != 'NaN' else 0
+
+        # Row Cache : entries 0, size 0 (bytes), capacity 0 (bytes), 0 hits, 0 requests, NaN recent hit rate, 0 save period in seconds
+        elif line[0] == 'Row' and line[1] == 'Cache' and line[3] == 'entries':
+            values['row_cache_entries'] = int(line[4].strip(','))
+            if line[7] == 'MB': values['row_cache_used'] = int(float(line[6])*1024*1024)
+            if re.match(bytes_regex, line[7]): values['row_cache_used'] = int(line[6])
+            if line[10] == 'MB': values['row_cache_size'] = int(float(line[9])*1024*1024)
+            if re.match(bytes_regex, line[10]): values['row_cache_size'] = int(line[9])
+            values['row_cache_hits'] = int(line[11])
+            values['row_cache_requests'] = int(line[13])
+            values['row_cache_efficiency'] = float(line[15]) if line[15] != 'NaN' else 0
+
+        # Row Cache : size 0 (bytes), capacity 0 (bytes), 0 hits, 0 requests, NaN recent hit rate, 0 save period in seconds
+        elif line[0] == 'Row' and line[1] == 'Cache' and line[3] == 'size':
+            values['row_cache_entries'] = 0
+            values['row_cache_used'] = int(line[4])
+            values['row_cache_size'] = int(line[7])
+            values['row_cache_hits'] = int(line[9])
+            values['row_cache_requests'] = int(line[11])
+            values['row_cache_efficiency'] = float(line[13]) if line[13] != 'NaN' else 0
+
+        # Counter Cache : entries 0, size 0 (bytes), capacity 0 (bytes), 0 hits, 0 requests, NaN recent hit rate, 7200 save period in seconds
+        elif line[0] == 'Counter' and line[1] == 'Cache' and line[3] == 'entries':
+            values['counter_cache_entries'] = int(line[4].strip(','))
+            if line[7] == 'MB': values['counter_cache_used'] = int(float(line[6])*1024*1024)
+            if re.match(bytes_regex, line[7]): values['counter_cache_used'] = int(line[6])
+            if line[10] == 'MB': values['counter_cache_size'] = int(float(line[9])*1024*1024)
+            if re.match(bytes_regex, line[10]): values['counter_cache_size'] = int(line[9])
+            values['counter_cache_hits'] = int(line[11])
+            values['counter_cache_requests'] = int(line[13])
+            values['counter_cache_efficiency'] = float(line[15]) if line[15] != 'NaN' else 0
+
+        # Counter Cache : size 0 (bytes), capacity 0 (bytes), 0 hits, 0 requests, NaN recent hit rate, 7200 save period in seconds
+        elif line[0] == 'Counter' and line[1] == 'Cache' and line[3] == 'size':
+            values['counter_cache_entries'] = 0
+            values['counter_cache_used'] = int(line[4])
+            values['counter_cache_size'] = int(line[7])
+            values['counter_cache_hits'] = int(line[9])
+            values['counter_cache_requests'] = int(line[11])
+            values['counter_cache_efficiency'] = float(line[13]) if line[13] != 'NaN' else 0
+
+        # Native Transport active: true
+        elif line[0] == 'Native' and line[1] == 'Transport':
+            values['Native_Transport_active'] = line[3]
+
+        else:
+            try:
+                varname = '_'.join(line[0:(line.index(':'))])
+                value = line[(line.index(':')+1)]
+                values[varname] = value
+            except:
+                pass
+
+    return values
+
+
+def check_cassandra(_no_item, params, info):
+    perfdata = []
+    #Failed to connect to '127.0.0.1:7199': Connection refused
+    #nodetool: Failed to connect to '127.0.0.1' - ConnectException: 'Connection refused'.
+    if (info[0][1] == 'Failed' and info[0][3] == 'connect') or (info[0][0] == 'Failed' and info[0][2] == 'connect'):
+        message = ' '.join(info[0][0:])
+        status = 2
+    else:
+        values = parse_cassandra(info)
+
+        timedif, exceptions = get_counter("cassandra.exceptions", time.time(), int(values['Exceptions']))
+        heap_mem_used = int(values['heap_mem_used_mb']*1024*1024)
+        heap_mem_total = int(values['heap_mem_total_mb']*1024*1024)
+        for what, value, format, unit in [
+            ( 'heap_mem_used',    heap_mem_used,        "%d",    "b" ),
+            ( 'heap_mem_total',    heap_mem_total,        "%d",    "b" ),
+            ( 'exceptions',        exceptions,            "%.2f",    ""  ),
+            ]:
+            perfdata.append((what, value, None, None))
+
+        if 'key_cache_size' in values and values['key_cache_size'] > 0:
+            timedif, key_cache_hits = get_counter("cassandra.key_cache_hits", time.time(), values['key_cache_hits'])
+            timedif, key_cache_requests = get_counter("cassandra.key_cache_requests", time.time(), values['key_cache_requests'])
+            for what, value, format, unit in [
+                ( 'key_cache_entries',    values['key_cache_entries'],    "%d",    "" ),
+                ( 'key_cache_used',        values['key_cache_used'],        "%d",    "b" ),
+                ( 'key_cache_size',        values['key_cache_size'],        "%d",    "b" ),
+                ( 'key_cache_hits',        key_cache_hits,                    "%.2f",    "" ),
+                ( 'key_cache_requests',    key_cache_requests,                "%.2f",    "" ),
+                ( 'key_cache_efficiency',    values['key_cache_efficiency'],    "%.2f",    "" ),
+                ]:
+                perfdata.append((what, value, None, None))
+
+        if 'row_cache_size' in values and values['row_cache_size'] > 0:
+            timedif, row_cache_hits = get_counter("cassandra.row_cache_hits", time.time(), values['row_cache_hits'])
+            timedif, row_cache_requests = get_counter("cassandra.row_cache_requests", time.time(), values['row_cache_requests'])
+            for what, value, format, unit in [
+                ( 'row_cache_entries',    values['row_cache_entries'],    "%d",    "" ),
+                ( 'row_cache_used',        values['row_cache_used'],        "%d",    "b" ),
+                ( 'row_cache_size',        values['row_cache_size'],        "%d",    "b" ),
+                ( 'row_cache_hits',        row_cache_hits,                    "%.2f",    "" ),
+                ( 'row_cache_requests',    row_cache_requests,                "%.2f",    "" ),
+                ( 'row_cache_efficiency',    values['row_cache_efficiency'],    "%.2f",    "" ),
+                ]:
+                perfdata.append((what, value, None, None))
+
+        if 'counter_cache_size' in values and values['counter_cache_size'] > 0:
+            timedif, counter_cache_hits = get_counter("cassandra.counter_cache_hits", time.time(), values['counter_cache_hits'])
+            timedif, counter_cache_requests = get_counter("cassandra.counter_cache_requests", time.time(), values['counter_cache_requests'])
+            for what, value, format, unit in [
+                ( 'counter_cache_entries',    values['counter_cache_entries'],    "%d",    "" ),
+                ( 'counter_cache_used',        values['counter_cache_used'],        "%d",    "b" ),
+                ( 'counter_cache_size',        values['counter_cache_size'],        "%d",    "b" ),
+                ( 'counter_cache_hits',        counter_cache_hits,                    "%.2f",    "" ),
+                ( 'counter_cache_requests',    counter_cache_requests,                "%.2f",    "" ),
+                ( 'counter_cache_efficiency',    values['counter_cache_efficiency'],    "%.2f",    "" ),
+                ]:
+                perfdata.append((what, value, None, None))
+
+
+        message = ' Gossip active: ' + values['Gossip_active'] + '  Thrift active: ' + values['Thrift_active'] + '  Native Transport active: ' + values['Native_Transport_active']
+
+        if values['Gossip_active'] != 'true' or values['Native_Transport_active'] != 'true':
+            status = 2
+        else:
+            status = 0
+
+    return (status, message, perfdata)
+
+
+
+check_info["cassandra"] = {
+    'check_function':            check_cassandra,
+    'inventory_function':        inventory_cassandra,
+    'service_description':       'Cassandra',
+    'has_perfdata':                True,
+}

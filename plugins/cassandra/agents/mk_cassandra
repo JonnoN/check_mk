@@ -1,0 +1,7 @@
+#!/bin/bash
+NODETOOL="/opt/cassandra/bin/nodetool"
+if [[ -x $NODETOOL ]]; then
+	echo '<<<cassandra>>>'
+	$NODETOOL info 2>&1
+fi
+
