@@ -1,0 +1,291 @@
+#!/usr/bin/python
+# -*- encoding: utf-8; py-indent-offset: 4 -*-
+
+#
+# Some InnoDB parsing code taken from: https://github.com/chrisboulton/collectd-python-mysql/
+# Author: Chris Boulton <chris@chrisboulton.com> 
+# License: MIT (http://www.opensource.org/licenses/mit-license.php) 
+#
+
+import re
+
+def make_bigint(high, low=None):
+    if low == None:
+        #assume it's hex
+        return int(high, 16)
+    else:
+        high = int(high)
+        low = int(low)
+        return (high * 4294967296) + low
+
+# hacking around a 10.2 bug:
+# Pending normal aio reads: 0 [0, 0, 0, 0...numthreads] , aio writes: 0 [0, 0, 0, 0...numthreads] ,
+# Pending normal aio reads: [0, 0, 0, 0...numthreads] , aio writes: [0, 0, 0, 0...numthreads] ,
+def parse_aio(line):
+    startpos = [i for i, item in enumerate(line) if item.startswith('[')] 
+    endpos = [i for i, item in enumerate(line) if item.endswith(']')]
+    if line[startpos[0] - 1] == 'reads:':
+        reads = sum(map(int, [ x.strip('[]') for x in line[startpos[0]:endpos[0]+1] ]))
+        writes = sum(map(int, [ x.strip('[]') for x in line[startpos[1]:endpos[1]+1] ]))
+    else:
+        reads = int(line[startpos[0] - 1])
+        writes = int(line[startpos[1] - 1])
+    return (reads, writes)
+
+
+def parse_mysql1(info):
+    values = {}
+    binlog_total_size = 0
+    proc_counts = {
+        'closing_tables': 0,
+        'copying_to_tmp_table': 0,
+        'end': 0,
+        'freeing_items': 0,
+        'init': 0,
+        'locked': 0,
+        'login': 0,
+        'none': 0,
+        'other': 0,
+        'preparing': 0,
+        'reading_from_net': 0,
+        'sending_data': 0,
+        'sorting_result': 0,
+        'statistics': 0,
+        'updating': 0,
+        'writing_to_net': 0,
+    }
+    innodb_status_vars = {
+        'active_transactions': 0,
+        'current_transactions': 0,
+        'file_reads': 0,
+        'file_system_memory': 0,
+        'file_writes': 0,
+        'innodb_lock_structs': 0,
+        'innodb_lock_wait_secs': 0,
+        'innodb_locked_tables': 0,
+        'innodb_sem_wait_time_ms': 0,
+        'innodb_sem_waits': 0,
+        'innodb_tables_in_use': 0,
+        'lock_system_memory': 0,
+        'locked_transactions': 0,
+        'log_writes': 0,
+        'page_hash_memory': 0,
+        'pending_aio_log_ios': 0,
+        'pending_buf_pool_flushes': 0,
+        'pending_chkp_writes': 0,
+        'pending_ibuf_aio_reads': 0,
+        'pending_log_writes':0,
+        'queries_inside': 0,
+        'queries_queued': 0,
+        'read_views': 0,
+    }
+    innodb_status_matches = {
+        # 0 read views open inside InnoDB
+        'read views open inside InnoDB': {
+            'read_views': 0,
+        },
+        # 5635328 OS file reads, 27018072 OS file writes, 20170883 OS fsyncs
+        'OS file reads': {
+            'file_reads': 0,
+            'file_writes': 4,
+            'file_fsyncs': 8,
+        },
+        # ibuf aio reads: 0, log i/o's: 0, sync i/o's: 0
+        # ibuf aio reads:, log i/o's:, sync i/o's:
+        'ibuf aio reads': {
+            'pending_ibuf_aio_reads': lambda line, innodb_status_vars: int(line[3]) if len(line) == 10 else 0,
+            'pending_aio_log_ios': lambda line, innodb_status_vars: int(line[6]) if len(line) == 10 else 0,
+            'pending_aio_sync_ios': lambda line, innodb_status_vars: int(line[9]) if len(line) == 10 else 0,
+        },
+        # Pending flushes (fsync) log: 0; buffer pool: 0
+        'Pending flushes (fsync)': {
+            'pending_log_flushes': 4,
+            'pending_buf_pool_flushes': 7,
+        },
+        # Pending normal aio reads: 0, aio writes: 0,
+        # Pending normal aio reads: 0 [0, 0, 0, 0...numthreads] , aio writes: 0 [0, 0, 0, 0...numthreads] ,
+        # Pending normal aio reads: [0, 0, 0, 0...numthreads] , aio writes: [0, 0, 0, 0...numthreads] ,
+        'Pending normal aio reads': {
+            'pending_normal_aio_reads': lambda line, innodb_status_vars: int(line[4]) if len(line) == 8 else parse_aio(line)[0],
+            'pending_normal_aio_writes': lambda line, innodb_status_vars: int(line[7]) if len(line) == 8 else parse_aio(line)[1],
+        },
+        # 16086708 log i/o's done, 106.07 log i/o's/second
+        " log i/o's done": {
+            'log_writes': 0,
+        },
+        # 0 pending log writes, 0 pending chkp writes
+        ' pending log writes': {
+            'pending_log_writes': 0,
+            'pending_chkp_writes': 4,
+        },
+        # Page hash           2302856 (buffer pool 0 only)
+        'Page hash ': {
+            'page_hash_memory': 2,
+        },
+        # File system         657820264     (812272 + 657007992)
+        'File system ': {
+            'file_system_memory': 2,
+        },
+        # Lock system         143820296     (143819576 + 720)
+        'Lock system ': {
+            'lock_system_memory': 2,
+        },
+        # 0 queries inside InnoDB, 0 queries in queue
+        'queries inside InnoDB': {
+            'queries_inside': 0,
+            'queries_queued': 4,
+        },
+        # --Thread 139954487744256 has waited at dict0dict.cc line 472 for 0.0000 seconds the semaphore:
+        'seconds the semaphore': {
+            'innodb_sem_waits': lambda line, innodb_status_vars: innodb_status_vars['innodb_sem_waits'] + 1,
+            'innodb_sem_wait_time_ms': lambda line, innodb_status_vars: int(float(line[9]) * 1000),
+        },
+        # mysql tables in use 1, locked 1     # but wait, this appears in 'latest detected deadlock, why would we want that?
+#        'mysql tables in use': {
+#            'innodb_tables_in_use': lambda line, innodb_status_vars: innodb_status_vars['innodb_tables_in_use'] + int(line[4]),
+#            'innodb_locked_tables': lambda line, innodb_status_vars: innodb_status_vars['innodb_locked_tables'] + int(line[6]),
+#        },
+        "------- TRX HAS BEEN": {
+            "innodb_lock_wait_secs": lambda line, innodb_status_vars: innodb_status_vars['innodb_lock_wait_secs'] + int(line[5]),
+        },
+        'Log sequence number': {
+            'log_bytes_written': lambda line, innodb_status_vars: int(line[3]) if len(line) == 4 else make_bigint(line[3], line[4])
+        },
+        'Log flushed up to': {
+            'log_bytes_flushed': lambda line, innodb_status_vars: int(line[4]) if len(line) == 5 else make_bigint(line[4], line[5])
+        },
+        'Last checkpoint at': {
+            'last_checkpoint': lambda line, innodb_status_vars: int(line[3]) if len(line) == 4 else make_bigint(line[3], line[4])
+        },
+        'merged recs': {
+            'ibuf_inserts': 0,
+            'ibuf_merged': 2,
+            'ibuf_merges': 5,
+        },
+        # Ibuf for space 0: size 1, free list len 140, seg size 142,
+        'Ibuf for space 0: size ': {
+            'ibuf_used_cells': 5,
+            'ibuf_free_cells': 9,
+            'ibuf_cell_count': 12,
+        },
+        # Ibuf: size 1, free list len 5, seg size 7,
+        'Ibuf: size ': {
+            'ibuf_used_cells': 2,
+            'ibuf_free_cells': 6,
+            'ibuf_cell_count': 9,
+            'ibuf_merges': lambda line, innodb_status_vars: int(line[10]) if len(line) == 12 else 0,
+        },
+        # Total memory allocated 11245977600; in additional pool allocated 0
+        'in additional pool allocated': {
+            'total_mem_alloc': 3,
+            'additional_pool_alloc': 8,
+        },
+        # Total large memory allocated 11004805120
+        # no more additional pools
+        'Total large memory allocated': {
+            'total_mem_alloc': 4,
+            'additional_pool_alloc': lambda line, innodb_status_vars: 0,
+        },
+        'Trx id counter': {
+            'innodb_transactions': lambda line, innodb_status_vars: make_bigint(line[3]) if len(line) == 4 else make_bigint(line[3], line[4]),
+        },
+        'History list length': {
+            'history_list': 3,
+        },
+        # Purge done for trx's n:o < 34025201875 undo n:o < 0 state: running but idle
+        # Purge done for trx's n:o < 20211A3 undo n:o < 0
+        # Purge done for trx's n:o < 3 328626424 undo n:o < 0 0
+#        'Purge done for': {
+#            'txn_purged': lambda line, innodb_status_vars: 
+        }
+    
+
+    prev_line = []
+    for line in info:
+        if line[0] == 'process' and line[1] != 'no':
+            state = line[7]
+            if state == '' or state == None: state = 'none'
+            state = re.sub(r'^(Table lock|Waiting for .*lock)$', "Locked", state)
+            state = state.lower().replace(" ", "_")
+            if state not in proc_counts: state = 'other'
+            proc_counts[state] += 1
+
+        elif 'binlog-' in line[0]:
+            # ancient mysql versions dont include file size in 'show master logs'
+            if len(line) == 2:
+                binlog_total_size += int(line[1])
+
+        elif len(line) == 2:
+            varname, value = line
+            try:
+                value = int(value)
+            except:
+                pass
+
+        elif len(line) == 1:
+            varname = line[0]
+            value = None
+
+        else:
+            # Parse Show Engine InnoDB Status output
+            line = [ re.sub('[,;]', '', x) for x in line ]
+            row = ' '.join(line)
+
+            # ---TRANSACTION 124324402462, not started
+            # ---TRANSACTION 124324402468, ACTIVE 0 sec committing
+            if row.find("---TRANSACTION") != -1:
+                innodb_status_vars['current_transactions'] += 1
+                if row.find("ACTIVE") != -1:
+                    innodb_status_vars['active_transactions'] += 1
+            # LOCK WAIT 228 lock struct(s), heap size 46632, 65 row lock(s), undo log entries 1
+            # 205 lock struct(s), heap size 30248, 37 row lock(s), undo log entries 1
+            # ROLLING BACK 13 lock struct(s), heap size 3024, undo log entries 7
+            elif row.find("lock struct(s)") != -1:
+                if row.find("LOCK WAIT") != -1:
+                    innodb_status_vars['innodb_lock_structs'] += int(line[2])
+                    innodb_status_vars['locked_transactions'] += 1
+                elif row.find("ROLLING BACK") != -1:
+                    innodb_status_vars['innodb_lock_structs'] += int(line[2])
+                else:
+                    innodb_status_vars['innodb_lock_structs'] += int(line[0])
+            # merged operations:
+            # insert 593983, delete mark 387006, delete 73092
+            elif row.find("delete mark ") != -1:
+                if prev_line[0] == 'merged':
+                    innodb_status_vars['ibuf_inserts'] = int(line[1])
+                    innodb_status_vars['ibuf_merged'] = int(line[1]) + int(line[4]) + int(line[6])
+            else:
+                for match in innodb_status_matches:
+                    if row.find(match) == -1: continue
+                    for key in innodb_status_matches[match]:
+                        value = innodb_status_matches[match][key]
+                        if type(value) is int:
+                            innodb_status_vars[key] = int(line[value])
+                        else:
+                            innodb_status_vars[key] = value(line, innodb_status_vars)
+                    break  
+    
+        values[varname] = value
+        prev_line = line
+        #theend
+
+
+    for key, value in proc_counts.iteritems():
+        varname = 'proc_' + key
+        values[varname] = value
+
+    for key, value in innodb_status_vars.iteritems():
+        values[key] = value
+
+    values['binlog_total_size'] = binlog_total_size
+    # default to 0 if these values are missing
+    values['uncheckpointed_bytes'] = int(values.get('log_bytes_written', 0)) - int(values.get('last_checkpoint', 0))
+    values['unflushed_log'] = int(values.get('log_bytes_written', 0)) - int(values.get('log_bytes_flushed', 0))
+    values['Key_buf_bytes_used'] = values.get('key_buffer_size', 0) - values.get('Key_blocks_unused', 0) * values.get('key_cache_block_size', 0)
+    values['Key_buf_bytes_unflushed'] = values.get('Key_blocks_not_flushed', 0) * values.get('key_cache_block_size', 0)
+
+    return values
+
+
+
+

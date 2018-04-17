@@ -1,0 +1,27 @@
+#!/usr/bin/python
+# -*- encoding: utf-8; py-indent-offset: 4 -*-
+# <<<mysql_ping>>>
+
+def inventory_mysql_ping(info):
+    output = " ".join(info[0])
+    if output:
+        return [(None, None)]
+
+
+def check_mysql_ping(_no_item, _no_params, info):
+    data = []
+    for line in info:
+        data.append(" ".join(line[0:]))
+    if data[0] == "mysqld is alive":
+        return (0, "%s" % data[0])
+    else:
+        return (2, "%s" % data[0] )
+
+
+check_info["mysql_ping"] = {
+    'check_function':        check_mysql_ping,
+    'inventory_function':    inventory_mysql_ping,
+    'service_description':    'MySQL Ping',
+}
+
+

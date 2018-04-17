@@ -1,0 +1,31 @@
+#!/usr/bin/python
+# -*- encoding: utf-8; py-indent-offset: 4 -*-
+# <<<mysql_ping_multi>>>
+
+def inventory_mysql_ping_multi(info):
+    inventory = []
+    for line in info:
+        name = line[0]
+        output = " ".join(line[1:])
+        if output and not name.startswith('_decommissioned'):
+            inventory.append( (name, None) )
+    return inventory
+
+def check_mysql_ping_multi(name, _no_params, info):
+    data = []
+    for line in info:
+        if line[0] == name:
+            data.append(" ".join(line[1:]))
+            if data[0] == "mysqld is alive":
+                return (0, "%s" % data[0])
+            else:
+                return (2, "%s" % data[0] )
+
+
+check_info["mysql_ping_multi"] = {
+    'check_function':        check_mysql_ping_multi,
+    'inventory_function':    inventory_mysql_ping_multi,
+    'service_description':    'MySQL Ping',
+}
+
+

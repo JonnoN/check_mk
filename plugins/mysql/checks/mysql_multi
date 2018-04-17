@@ -1,0 +1,144 @@
+#!/usr/bin/python
+# -*- encoding: utf-8; py-indent-offset: 4 -*-
+
+check_includes['mysql_multi'] = [ "mysql.include", "mysql" ] 
+
+#
+#  mysql_multi.sessions
+#
+
+def inventory_mysql_multi_sessions(info):
+	inventory = []
+	for line in info:
+		if len(line) > 1:
+			if line[1] == 'Threads_connected':
+				inventory.append(( line[0], "mysql_sessions_default_values" ))
+	return inventory
+
+def check_mysql_multi_sessions(item, params, info):
+	data = []
+	for line in info:
+		if len(line) > 1 and line[0] == item:
+			data.append(line[1:])
+	return check_mysql_sessions(item, params, data)
+
+check_info['mysql_multi.sessions'] = {
+    "check_function"          : check_mysql_multi_sessions,
+    "inventory_function"      : inventory_mysql_multi_sessions,
+    "service_description"     : "MySQL Sessions %s",
+    "has_perfdata"            : True,
+    "group"                   : "mysql_multi_sessions",
+}
+
+
+#
+# mysql_multi.iostat
+#
+
+def inventory_mysql_multi_iostat(info):
+    inventory = []
+    for line in info:
+        if len(line) > 1:
+            if line[1] == 'innodb_version' or 'have_innodb':
+                inventory.append(( line[0], "mysql_iostat_default_values" ))
+    return inventory
+
+def check_mysql_multi_iostat(item, params, info):
+    data = []
+    for line in info:
+        if len(line) > 1 and line[0] == item:
+            data.append(line[1:])
+    return check_mysql_iostat(item, params, data)
+
+check_info['mysql_multi.innodb_io'] = {
+    "includes"                : [ "diskstat.include" ],
+    "check_function"          : check_mysql_multi_iostat,
+    "inventory_function"      : inventory_mysql_multi_iostat,
+    "service_description"     : "MySQL InnoDB IO %s",
+    "has_perfdata"            : True,
+    "group"                   : "mysql_multi_innodb_io",
+}
+
+
+#
+# mysql_multi.connections
+#
+
+def inventory_mysql_multi_connections(info):
+    inventory = []
+    for line in info:
+        if len(line) > 1:
+            if line[1] == 'Max_used_connections':
+                inventory.append(( line[0], "mysql_connections_default_values" ))
+    return inventory
+
+def check_mysql_multi_connections(item, params, info):
+    data = []
+    for line in info:
+        if len(line) > 1 and line[0] == item:
+            data.append(line[1:])
+    return check_mysql_connections(item, params, data)
+
+check_info['mysql_multi.connections'] = {
+    "check_function"          : check_mysql_multi_connections,
+    "inventory_function"      : inventory_mysql_multi_connections,
+    "service_description"     : "MySQL Connections %s",
+    "has_perfdata"            : True,
+    "group"                   : "mysql_multi_connections",
+}
+
+
+#
+# mysql_multi.slave
+#
+
+def inventory_mysql_multi_slave(info):
+    inventory = []
+    for line in info:
+        if len(line) > 1:
+            if line[1] == 'Master_Host':
+                inventory.append(( line[0], "mysql_slave_default_values" ))
+    return inventory
+
+def check_mysql_multi_slave(item, params, info):
+    data = []
+    for line in info:
+        if len(line) > 1 and line[0] == item:
+            data.append(line[1:])
+    return check_mysql_slave(item, params, data)
+
+check_info["mysql_multi.slave"] = {
+    'check_function':       check_mysql_multi_slave,
+    'inventory_function':   inventory_mysql_multi_slave,
+    'service_description':  'MySQL Slave %s',
+    'has_perfdata':         True,
+}
+
+
+#
+# mysql_multi.performance
+#
+
+def inventory_mysql_multi_performance(info):
+    inventory = []
+    for line in info:
+        if len(line) > 1:
+            if line[1] == 'Questions':
+                inventory.append(( line[0], None ))
+    return inventory
+
+def check_mysql_multi_performance(item, params, info):
+    data = []
+    for line in info:
+        if len(line) > 1 and line[0] == item:
+            data.append(line[1:])
+    return check_mysql_performance(item, params, data)
+
+check_info['mysql_multi.performance'] = {
+    "check_function"          : check_mysql_multi_performance,
+    "inventory_function"      : inventory_mysql_multi_performance,
+    "service_description"     : "MySQL Performance Counters %s",
+    "has_perfdata"            : True,
+    "group"                   : "mysql_multi_performance",
+}
+

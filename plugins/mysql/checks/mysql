@@ -1,0 +1,700 @@
+#!/usr/bin/python
+# -*- encoding: utf-8; py-indent-offset: 4 -*-
+
+check_includes['mysql'] = [ "mysql.include" ] 
+
+
+#
+#  mysql.sessions
+#
+
+mysql_sessions_default_values = {
+    "running" : (30, 60),
+    "total" : (200, 300),
+    "connections" : (20, 40),
+    }
+
+def inventory_mysql_sessions(info):
+    values = parse_mysql1(info)
+    if 'Threads_connected' in values:
+        # TODO: set 'total' threshold based on max_connections setting?
+        return [(None, "mysql_sessions_default_values")]
+
+def check_mysql_sessions(item, params, info):
+    if item is None:
+        item = "mysql"
+    values = parse_mysql1(info)
+    total_sessions = values["Threads_connected"]
+    running_sessions = values["Threads_running"]
+    timedif, connections = get_counter("mysql.sessions.%s" % item, time.time(), values["Connections"])
+
+    infotext = " - %d sessions (%d running), %.2f connections/s" % (
+        total_sessions, running_sessions, connections)
+
+    infos = []
+    perfdata = []
+    status = 0
+
+    for value, what, format, unit in [
+        ( total_sessions,   "total",       "%d",   "" ),
+        ( running_sessions, "running",     "%d",   "" ),
+        ( connections,      "connections", "%.2f", "/s")]:
+        infos.append((format + " %s%s") % (value, what, unit))
+        if what in params:
+            warn, crit = params[what]
+            if value >= crit:
+                status = 2
+                infos[-1] += "(!!)"
+            elif value >= warn:
+                status = max(status, 1)
+                infos[-1] += "(!)"
+        else:
+            warn, crit = None, None
+        perfdata.append((what, value, warn, crit))
+
+    infotext = " - " + ", ".join(infos)
+    return (status, infotext, perfdata)
+
+
+check_info['mysql.sessions'] = {
+    "check_function"          : check_mysql_sessions,
+    "inventory_function"      : inventory_mysql_sessions,
+    "service_description"     : "MySQL Sessions",
+    "has_perfdata"            : True,
+    "group"                   : "mysql_sessions",
+}
+
+
+#
+# mysql.iostat
+#
+
+mysql_iostat_default_values =  {
+	'read'   : (30.0, 90.0),
+	'write'  : (20.0, 50.0),
+#	'average': 15
+	}
+
+
+def inventory_mysql_iostat(info):
+    if len(info) > 200:
+        return [(None, "mysql_iostat_default_values")]
+
+def check_mysql_iostat(item, params, info):
+    values = parse_mysql1(info)
+    if "Innodb_data_read" in values and "Innodb_data_written" in values:
+        line = [ None, None, values["Innodb_data_read"] / 512, values["Innodb_data_written"] / 512]
+        return check_diskstat_line(time.time(), 'innodb_io.%s' % item, params, line)
+    else:
+        return (2, "Unable to find InnoDB data. Check if Engine is running", None)
+
+
+check_info['mysql.innodb_io'] = {
+    "includes"                : [ "diskstat.include" ],
+    "check_function"          : check_mysql_iostat,
+    "inventory_function"      : inventory_mysql_iostat,
+    "service_description"     : "MySQL InnoDB IO",
+    "has_perfdata"            : True,
+    "group"                   : "mysql_innodb_io",
+}
+
+
+#
+# mysql.connections
+#
+mysql_connections_default_values = {
+    "perc_used" : (80, 90),
+    }
+
+def inventory_mysql_connections(info):
+    values = parse_mysql1(info)
+    if 'Max_used_connections' in values and 'max_connections' in values:
+        return [(None, "mysql_connections_default_values")]
+
+def check_mysql_connections(item, params, info):
+    values = parse_mysql1(info)
+    if 'Max_used_connections' not in values:
+        return (3, 'UNKNOWN - Connection information are missing')
+
+    # The maximum number of connections that have been in use simultaneously
+    # since the server started.
+    conn = float(values['Max_used_connections'])
+    # Maximum number of possible parallel connections
+    max_conn = float(values['max_connections'])
+
+    perc_used = conn / max_conn * 100
+
+    status = 0
+    status_txt = ''
+    if 'perc_used' in params:
+        if perc_used >= params['perc_used'][1]:
+            status = 2
+            status_txt = ' (Threshold (%0.2f%%) for number of maximum parallel connections ' \
+                         'has been reached at least once since program start' % params['perc_used'][1]
+        elif perc_used >= params['perc_used'][0]:
+            status = 1
+            status_txt = ' (Threshold (%0.2f%%) for number of maximum parallel connections ' \
+                         'has been reached at least once since program start)' % params['perc_used'][0]
+
+    return (status, '%s - Max. parallel Connections: %d (Max.: %d): %0.2f%%%s' %
+        (status, conn, max_conn, perc_used, status_txt))
+
+
+check_info['mysql.connections'] = {
+    "check_function"          : check_mysql_connections,
+    "inventory_function"      : inventory_mysql_connections,
+    "service_description"     : "MySQL Connections",
+    "has_perfdata"            : True,
+    "group"                   : "mysql_connections",
+}
+
+#
+# mysql.slave
+#
+mysql_slave_default_values = (900,1800)
+
+def inventory_mysql_slave(info):
+    values = parse_mysql1(info)
+    if 'Master_Host' in values:
+        return [(None, "mysql_slave_default_values")]
+
+
+def check_mysql_slave(item, params, info):
+    warn, crit = params
+    values = parse_mysql1(info)
+    slave_io_running = values["Slave_IO_Running"]
+    slave_sql_running = values["Slave_SQL_Running"]
+    seconds_behind = values["Seconds_Behind_Master"]
+    perfdata = [ ( "seconds_behind", str(seconds_behind) + "s", warn, crit ) ] 
+
+    if slave_io_running == "Yes":
+        if slave_sql_running == "Yes":
+            if seconds_behind < warn:
+                return (0, "Slave running, seconds behind master = %d" % seconds_behind, perfdata)
+            elif seconds_behind < crit:
+                return (1, "Slave running, seconds behind master = %d" % seconds_behind, perfdata)
+            else:       
+                return (2, "Slave running, seconds behind master = %d" % seconds_behind, perfdata)
+        else:
+            return (2, "Slave SQL thread stopped. Slave IO thread running." )
+    elif slave_sql_running == "Yes":
+            return (2, "Slave IO thread stopped. Slave SQL thread running." )
+    else:
+        return (2, "Slave SQL thread stopped. Slave IO thread stopped.")
+
+
+check_info["mysql.slave"] = {
+    'check_function':       check_mysql_slave,
+    'inventory_function':   inventory_mysql_slave,
+    'service_description':  'MySQL Slave',
+    'has_perfdata':         True,
+}
+
+
+
+#
+# mysql.performance
+#
+
+def inventory_mysql_performance(info):
+    values = parse_mysql1(info)
+    if 'Max_used_connections' in values and 'max_connections' in values:
+        return [(None, None)]
+
+def check_mysql_performance(item, params, info):
+    #print info
+
+    values = parse_mysql1(info)
+
+    # Command Counters
+    # very old versions don't have a separate Queries counter, makes sense to me to sub with Questions
+    if "Queries" in values:
+        timedif, queries = get_counter("mysql.performance.queries.%s" % item, time.time(), values["Queries"])
+    else:
+        timedif, queries = get_counter("mysql.performance.queries.%s" % item, time.time(), values["Questions"])
+    timedif, questions = get_counter("mysql.performance.questions.%s" % item, time.time(), values["Questions"])
+    timedif, selects = get_counter("mysql.performance.selects.%s" % item, time.time(), values["Com_select"])
+    timedif, inserts = get_counter("mysql.performance.inserts.%s" % item, time.time(), values["Com_insert"])
+    timedif, updates = get_counter("mysql.performance.updates.%s" % item, time.time(), values["Com_update"])
+    timedif, replaces = get_counter("mysql.performance.replaces.%s" % item, time.time(), values["Com_replace"])
+    timedif, deletes = get_counter("mysql.performance.deletes.%s" % item, time.time(), values["Com_delete"])
+    timedif, calls = get_counter("mysql.performance.calls.%s" % item, time.time(), values["Com_call_procedure"])
+    timedif, loads = get_counter("mysql.performance.loads.%s" % item, time.time(), values["Com_load"])
+    timedif, delete_multis = get_counter("mysql.performance.delete_multis.%s" % item, time.time(), values["Com_delete_multi"])
+    timedif, insert_selects = get_counter("mysql.performance.insert_selects.%s" % item, time.time(), values["Com_insert_select"])
+    timedif, update_multis = get_counter("mysql.performance.update_multis.%s" % item, time.time(), values["Com_update_multi"])
+    timedif, replace_selects = get_counter("mysql.performance.replace_selects.%s" % item, time.time(), values["Com_replace_select"])
+    
+    # Binary / Relay Logs
+    timedif, binlog_cache_use = get_counter("mysql.performance.binlog_cache_use.%s" % item, time.time(), values["Binlog_cache_use"])
+    timedif, binlog_cache_disk_use = get_counter("mysql.performance.binlog_cache_disk_use.%s" % item, time.time(), values["Binlog_cache_disk_use"])
+    binlog_total_size = values["binlog_total_size"]
+    if "relay_log_space" in values:
+        relay_log_space = values["relay_log_space"]
+
+    # Connections
+    max_connections = values["max_connections"]
+    max_used_connections = values["Max_used_connections"]
+    timedif, aborted_clients = get_counter("mysql.performance.aborted_clients.%s" % item, time.time(), values["Aborted_clients"])
+    timedif, aborted_connects = get_counter("mysql.performance.aborted_connects.%s" % item, time.time(), values["Aborted_connects"])
+    threads_running = values["Threads_running"]
+    threads_connected = values["Threads_connected"]
+    timedif, connections = get_counter("mysql.performance.connections.%s" % item, time.time(), values["Connections"])
+
+    # Files and Tables
+    table_open_cache = values["table_open_cache"] if "table_open_cache" in values.keys() else values["table_cache"]
+    open_tables = values["Open_tables"]
+    open_files = values["Open_files"]
+    timedif, opened_tables = get_counter("mysql.performance.opened_tables.%s" % item, time.time(), values["Opened_tables"])
+
+    # Handlers
+    timedif, handler_write = get_counter("mysql.performance.handler_write.%s" % item, time.time(), values["Handler_write"])
+    timedif, handler_update = get_counter("mysql.performance.handler_update.%s" % item, time.time(), values["Handler_update"])
+    timedif, handler_delete = get_counter("mysql.performance.handler_delete.%s" % item, time.time(), values["Handler_delete"])
+    timedif, handler_read_first = get_counter("mysql.performance.handler_read_first.%s" % item, time.time(), values["Handler_read_first"])
+    timedif, handler_read_key = get_counter("mysql.performance.handler_read_key.%s" % item, time.time(), values["Handler_read_key"])
+    timedif, handler_read_next = get_counter("mysql.performance.handler_read_next.%s" % item, time.time(), values["Handler_read_next"])
+    timedif, handler_read_prev = get_counter("mysql.performance.handler_read_prev.%s" % item, time.time(), values["Handler_read_prev"])
+    timedif, handler_read_rnd = get_counter("mysql.performance.handler_read_rnd.%s" % item, time.time(), values["Handler_read_rnd"])
+    timedif, handler_read_rnd_next = get_counter("mysql.performance.handler_read_rnd_next.%s" % item, time.time(), values["Handler_read_rnd_next"])
+
+    # Network Traffic
+    timedif, bytes_sent = get_counter("mysql.performance.bytes_sent.%s" % item, time.time(), values["Bytes_sent"])
+    timedif, bytes_received = get_counter("mysql.performance.bytes_received.%s" % item, time.time(), values["Bytes_received"])
+
+    # Processlist
+    proc_closing_tables = values["proc_closing_tables"]
+    proc_copying_to_tmp_table = values["proc_copying_to_tmp_table"]
+    proc_end = values["proc_end"]
+    proc_freeing_items = values["proc_freeing_items"]
+    proc_init = values["proc_init"]
+    proc_locked = values["proc_locked"]
+    proc_login = values["proc_login"]
+    proc_none = values["proc_none"]
+    proc_other = values["proc_other"]
+    proc_preparing = values["proc_preparing"]
+    proc_reading_from_net = values["proc_reading_from_net"]
+    proc_sending_data = values["proc_sending_data"]
+    proc_sorting_result = values["proc_sorting_result"]
+    proc_statistics = values["proc_statistics"]
+    proc_updating = values["proc_updating"]
+    proc_writing_to_net = values["proc_writing_to_net"]
+
+
+    # Query Cache
+    if values["query_cache_type"] == "ON" and values["query_cache_size"] > 0:
+        qcache_queries = values["Qcache_queries_in_cache"]
+        timedif, qcache_hits = get_counter("mysql.performance.qcache_hits.%s" % item, time.time(), values["Qcache_hits"])
+        timedif, qcache_inserts = get_counter("mysql.performance.qcache_inserts.%s" % item, time.time(), values["Qcache_inserts"])
+        timedif, qcache_not_cached = get_counter("mysql.performance.qcache_not_cached.%s" % item, time.time(), values["Qcache_not_cached"])
+        timedif, qcache_lowmem_prunes = get_counter("mysql.performance.qcache_lowmem_prunes.%s" % item, time.time(), values["Qcache_lowmem_prunes"])
+
+        # Query Cache Memory
+        qcache_size = values["query_cache_size"]
+        qcache_freemem = values["Qcache_free_memory"]
+        qcache_total_blocks = values["Qcache_total_blocks"]
+        qcache_free_blocks = values["Qcache_free_blocks"]
+
+    # Replication Status
+    # TODO only if slave
+    # TODO maybe steal code from percona cacti fetch script
+
+    # Select Types
+    timedif, select_full_join = get_counter("mysql.performance.select_full_join.%s" % item, time.time(), values["Select_full_join"])
+    timedif, select_full_range_join = get_counter("mysql.performance.select_full_range_join.%s" % item, time.time(), values["Select_full_range_join"])
+    timedif, select_range = get_counter("mysql.performance.select_range.%s" % item, time.time(), values["Select_range"])
+    timedif, select_range_check = get_counter("mysql.performance.select_range_check.%s" % item, time.time(), values["Select_range_check"])
+    timedif, select_scan = get_counter("mysql.performance.select_scan.%s" % item, time.time(), values["Select_scan"])
+
+    # Sorts
+    timedif, sort_rows = get_counter("mysql.performance.sort_rows.%s" % item, time.time(), values["Sort_rows"])
+    timedif, sort_range = get_counter("mysql.performance.sort_range.%s" % item, time.time(), values["Sort_range"])
+    timedif, sort_merge_passes = get_counter("mysql.performance.sort_merge_passes.%s" % item, time.time(), values["Sort_merge_passes"])
+    timedif, sort_scan = get_counter("mysql.performance.sort_scan.%s" % item, time.time(), values["Sort_scan"])
+
+    # Table Locks
+    timedif, table_locks_immediate = get_counter("mysql.performance.table_locks_immediate.%s" % item, time.time(), values["Table_locks_immediate"])
+    timedif, table_locks_waited = get_counter("mysql.performance.table_locks_waited.%s" % item, time.time(), values["Table_locks_waited"])
+    timedif, slow_queries = get_counter("mysql.performance.slow_queries.%s" % item, time.time(), values["Slow_queries"])
+
+    # Temporary Objects
+    timedif, tmp_tables_created =  get_counter("mysql.performance.tmp_tables_created.%s" % item, time.time(), values["Created_tmp_tables"])
+    timedif, tmp_disk_tables_created =  get_counter("mysql.performance.tmp_disk_tables_created.%s" % item, time.time(), values["Created_tmp_disk_tables"])    
+    timedif, tmp_files_created =  get_counter("mysql.performance.tmp_files_created.%s" % item, time.time(), values["Created_tmp_files"])
+
+    # Threads
+    thread_cache_size = values["thread_cache_size"]
+    timedif, threads_created = get_counter("mysql.performance.threads_created.%s" % item, time.time(), values["Threads_created"])
+    threads_cached = values["Threads_cached"]
+
+    # Transaction Handler
+    timedif, handler_commit = get_counter("mysql.performance.handler_commit.%s" % item, time.time(), values["Handler_commit"])
+    timedif, handler_rollback = get_counter("mysql.performance.handler_rollback.%s" % item, time.time(), values["Handler_rollback"])
+    timedif, handler_savepoint = get_counter("mysql.performance.handler_savepoint.%s" % item, time.time(), values["Handler_savepoint"])
+    timedif, handler_savepoint_rollback = get_counter("mysql.performance.handler_savepoint_rollback.%s" % item, time.time(), values["Handler_savepoint_rollback"])
+
+    # InnoDB Adaptive Hash Index
+    # TODO "Hash table size $size" is in innodb output, or different sections and format by version
+    # "used cells $size" only exists in some versions
+
+    # InnoDB Buffer Pool
+    innodb_buffer_pool_size = values["innodb_buffer_pool_size"]
+    innodb_buffer_pool_pages_total = values["Innodb_buffer_pool_pages_total"]
+    innodb_buffer_pool_pages_data = values["Innodb_buffer_pool_pages_data"]
+    innodb_buffer_pool_pages_free = values["Innodb_buffer_pool_pages_free"]
+    innodb_buffer_pool_pages_dirty = values["Innodb_buffer_pool_pages_dirty"]
+    
+    # InnoDB Buffer Pool Activity
+    timedif, innodb_pages_created = get_counter("mysql.performance.innodb_pages_created.%s" % item, time.time(), values["Innodb_pages_created"])
+    timedif, innodb_pages_read = get_counter("mysql.performance.innodb_pages_read.%s" % item, time.time(), values["Innodb_pages_read"])
+    timedif, innodb_pages_written = get_counter("mysql.performance.innodb_pages_written.%s" % item, time.time(), values["Innodb_pages_written"])
+
+    # InnoDB Buffer Pool Efficiency
+    timedif, innodb_buffer_pool_reads = get_counter("mysql.performance.innodb_buffer_pool_reads.%s" % item, time.time(), values["Innodb_buffer_pool_reads"])
+    timedif, innodb_buffer_pool_read_requests = get_counter("mysql.performance.innodb_buffer_pool_read_requests.%s" % item, time.time(), values["Innodb_buffer_pool_read_requests"])
+
+    # InnoDB Checkpoint Age
+    uncheckpointed_bytes = values['uncheckpointed_bytes']
+
+    # InnoDB Current Lock Waits
+    innodb_lock_wait_secs = values['innodb_lock_wait_secs']
+
+    # InnoDB Insert Buffer
+    timedif, ibuf_inserts = get_counter("mysql.performance.ibuf_inserts.%s" % item, time.time(), values["ibuf_inserts"])
+    timedif, ibuf_merged = get_counter("mysql.performance.ibuf_merged.%s" % item, time.time(), values["ibuf_merged"])
+    timedif, ibuf_merges = get_counter("mysql.performance.ibuf_merges.%s" % item, time.time(), values["ibuf_merges"])
+
+    # InnoDB Insert Buffer Usage
+    ibuf_cell_count = values["ibuf_cell_count"]
+    ibuf_used_cells = values["ibuf_used_cells"]
+    ibuf_free_cells = values["ibuf_free_cells"]
+
+    # TODO InnoDB Internal Adaptive Hash Memory Usage  percona/maria only?
+    #
+
+    # InnoDB IO
+    timedif, file_reads = get_counter("mysql.performance.file_reads.%s" % item, time.time(), values["file_reads"])
+    timedif, file_writes = get_counter("mysql.performance.file_writes.%s" % item, time.time(), values["file_writes"])
+    timedif, log_writes = get_counter("mysql.performance.log_writes.%s" % item, time.time(), values["log_writes"])
+    timedif, file_fsyncs = get_counter("mysql.performance.file_fsyncs.%s" % item, time.time(), values["file_fsyncs"])
+
+    # InnoDB IO Pending
+    pending_aio_log_ios = values["pending_aio_log_ios"]
+    pending_aio_sync_ios = values["pending_aio_sync_ios"]
+    pending_buf_pool_flushes = values["pending_buf_pool_flushes"]
+    pending_chkp_writes = values["pending_chkp_writes"]
+    pending_ibuf_aio_reads = values["pending_ibuf_aio_reads"]
+    pending_log_flushes = values["pending_log_flushes"]
+    pending_log_writes = values["pending_log_writes"]
+    pending_normal_aio_reads = values["pending_normal_aio_reads"]
+    pending_normal_aio_writes = values["pending_normal_aio_writes"]
+
+    # InnoDB Lock Structures
+    innodb_lock_structs = values["innodb_lock_structs"]
+
+    # InnoDB Log Activity
+    innodb_log_buffer_size = values["innodb_log_buffer_size"]
+    timedif, log_bytes_written = get_counter("mysql.performance.log_bytes_written.%s" % item, time.time(), values["log_bytes_written"])
+    timedif, log_bytes_flushed = get_counter("mysql.performance.log_bytes_flushed.%s" % item, time.time(), values["log_bytes_flushed"])
+    unflushed_log = values["unflushed_log"]
+
+    # InnoDB Memory Allocation
+    total_mem_alloc = values["total_mem_alloc"]
+    additional_pool_alloc = values["additional_pool_alloc"]
+
+    # InnoDB Row Lock Time
+    timedif, innodb_row_lock_time = get_counter("mysql.performance.innodb_row_lock_time.%s" % item, time.time(), values["Innodb_row_lock_time"])
+
+    # InnoDB Row Lock Waits
+    timedif, innodb_row_lock_waits = get_counter("mysql.performance.innodb_row_lock_waits.%s" % item, time.time(), values["Innodb_row_lock_waits"])
+
+    # InnoDB Row Operations
+    timedif, innodb_rows_read =  get_counter("mysql.performance.innodb_rows_read.%s" % item, time.time(), values["Innodb_rows_read"])
+    timedif, innodb_rows_deleted =  get_counter("mysql.performance.innodb_rows_deleted.%s" % item, time.time(), values["Innodb_rows_deleted"])
+    timedif, innodb_rows_updated =  get_counter("mysql.performance.innodb_rows_updated.%s" % item, time.time(), values["Innodb_rows_updated"])
+    timedif, innodb_rows_inserted =  get_counter("mysql.performance.innodb_rows_inserted.%s" % item, time.time(), values["Innodb_rows_inserted"])
+
+    # InnoDB Semaphores
+    # TODO lots of version-specific stuff
+
+    # InnoDB Semaphore Wait Time
+    innodb_sem_wait_time_ms = values["innodb_sem_wait_time_ms"]
+
+    # InnoDB Semaphore Waits
+    innodb_sem_waits = values["innodb_sem_waits"]
+
+    # InnoDB Tables In Use
+    # TODO I don't think the original code works properly (forever catches deadlocked transactions)(see mysql.include)
+
+    # InnoDB Transactions
+    timedif, innodb_transactions = get_counter("mysql.performance.innodb_transactions.%s" % item, time.time(), values["innodb_transactions"])
+    history_list = values["history_list"]
+
+    # InnoDB Active/Locked Transactions
+    active_transactions = values["active_transactions"]
+    locked_transactions = values["locked_transactions"]
+    current_transactions = values["current_transactions"]
+    read_views = values["read_views"]
+
+    # MyISAM Indexes
+    timedif, key_read_requests = get_counter("mysql.performance.key_read_requests.%s" % item, time.time(), values["Key_read_requests"])
+    timedif, key_reads = get_counter("mysql.performance.key_reads.%s" % item, time.time(), values["Key_reads"])
+    timedif, key_write_requests = get_counter("mysql.performance.key_write_requests.%s" % item, time.time(), values["Key_write_requests"])
+    timedif, key_writes = get_counter("mysql.performance.key_writes.%s" % item, time.time(), values["Key_writes"])
+
+    # MyISAM Key Cache
+    key_buffer_size = values["key_buffer_size"]
+    key_buf_bytes_used = values["Key_buf_bytes_used"]
+    key_buf_bytes_unflushed = values["Key_buf_bytes_unflushed"]
+
+    
+    infotext = values["version"]
+
+    infos = []
+    perfdata = []
+    status = 0
+
+    for value, what, format, unit in [
+        # Command Counters
+        ( queries,                    "queries",                    "%.2f", "/s" ),
+        ( questions,                  "questions",                  "%.2f", "/s" ),
+        ( selects,                    "selects",                    "%.2f", "/s" ),
+        ( inserts,                    "inserts",                    "%.2f", "/s" ),
+        ( updates,                    "updates",                    "%.2f", "/s" ),
+        ( replaces,                   "replaces",                   "%.2f", "/s" ),
+        ( deletes,                    "deletes",                    "%.2f", "/s" ),
+        ( calls,                      "calls",                      "%.2f", "/s" ),
+        ( loads,                      "loads",                      "%.2f", "/s" ),
+        ( delete_multis,              "delete_multis",              "%.2f", "/s" ),
+        ( insert_selects,             "insert_selects",             "%.2f", "/s" ),
+        ( update_multis,              "update_multis",              "%.2f", "/s" ),
+        ( replace_selects,            "replace_selects",            "%.2f", "/s" ),
+
+        # Binary/Relay Logs
+        ( binlog_cache_use,           "binlog_cache_use",           "%d",   "" ),
+        ( binlog_cache_disk_use,      "binlog_cache_disk_use",      "%d",   "" ),
+        ( binlog_total_size,          "binlog_total_size",          "%d",   "b" ),
+
+        # Connections
+        ( max_connections,            "max_connections",            "%d",   "" ),
+        ( max_used_connections,       "max_used_connections",       "%d",   "" ),
+        ( aborted_clients,            "aborted_clients",            "%.2f", "/s" ),
+        ( aborted_connects,           "aborted_connects",           "%.2f", "/s" ),
+        ( threads_running,            "threads_running",            "%d",   "" ),
+        ( threads_connected,          "threads_connected",          "%d",   "" ),
+        ( connections,                "connections",                "%.2f", "/s" ),
+
+        # Handlers
+        ( handler_write,              "handler_write",              "%.2f", "/s" ),
+        ( handler_update,             "handler_update",             "%.2f", "/s" ),
+        ( handler_delete,             "handler_delete",             "%.2f", "/s" ),
+        ( handler_read_first,         "handler_read_first",         "%.2f", "/s" ),
+        ( handler_read_key,           "handler_read_key",           "%.2f", "/s" ),
+        ( handler_read_next,          "handler_read_next",          "%.2f", "/s" ),
+        ( handler_read_prev,          "handler_read_prev",          "%.2f", "/s" ),
+        ( handler_read_rnd,           "handler_read_rnd",           "%.2f", "/s" ),
+        ( handler_read_rnd_next,      "handler_read_rnd_next",      "%.2f", "/s" ),
+
+        # Network Traffic
+        ( bytes_sent,                 "bytes_sent",                 "%.2f", "/s" ),
+        ( bytes_received,             "bytes_received",             "%.2f", "/s" ),
+
+        # Files and Tables
+        ( table_open_cache,           "table_open_cache",           "%d",   "" ),
+        ( open_tables,                "open_tables",                "%d",   "" ),
+        ( open_files,                 "open_files",                 "%d",   "" ),
+        ( opened_tables,              "opened_tables",              "%.2f", "/s" ),
+
+        # Select Types
+        ( select_full_join,           "select_full_join",           "%.2f", "" ),
+        ( select_full_range_join,     "select_full_range_join",     "%.2f", "" ),
+        ( select_range,               "select_range",               "%.2f", "" ),
+        ( select_range_check,         "select_range_check",         "%.2f", "" ),
+        ( select_scan,                "select_scan",                "%.2f", "" ),
+
+        # Sorts
+        ( sort_rows,                  "sort_rows",                  "%.2f", "" ),
+        ( sort_range,                 "sort_range",                 "%.2f", "" ),
+        ( sort_merge_passes,          "sort_merge_passes",          "%.2f", "" ),
+        ( sort_scan,                  "sort_scan",                  "%.2f", "" ),
+        
+        # Table Locks
+        ( table_locks_immediate,      "table_locks_immediate",      "%.2f", "" ),
+        ( table_locks_waited,         "table_locks_waited",         "%.2f", "" ),
+        ( slow_queries,               "slow_queries",               "%.2f", "" ),
+
+        # Temporary Objects
+        ( tmp_tables_created,         "tmp_tables_created",         "%.2f", "" ),
+        ( tmp_disk_tables_created,    "tmp_disk_tables_created",    "%.2f", "" ),
+        ( tmp_files_created,          "tmp_files_created",          "%.2f", "" ),
+
+        # Threads
+        ( thread_cache_size,          "thread_cache_size",          "%d",   "" ),
+        ( threads_created,            "threads_created",            "%.2f", "" ),
+        ( threads_cached,             "threads_cached",             "%d",   "" ),
+
+        # Transaction Handler
+        ( handler_commit,             "handler_commit",             "%.2f", "" ),
+        ( handler_rollback,           "handler_rollback",           "%.2f", "" ),
+        ( handler_savepoint,          "handler_savepoint",          "%.2f", "" ),
+        ( handler_savepoint_rollback, "handler_savepoint_rollback", "%.2f", "" ),
+
+        # Processlist
+        ( proc_closing_tables,        "proc_closing_tables",        "%d",   "" ),
+        ( proc_copying_to_tmp_table,  "proc_copying_to_tmp_table",  "%d",   "" ),
+        ( proc_end,                   "proc_end",                   "%d",   "" ),
+        ( proc_freeing_items,         "proc_freeing_items",         "%d",   "" ),
+        ( proc_init,                  "proc_init",                  "%d",   "" ),
+        ( proc_locked,                "proc_locked",                "%d",   "" ),
+        ( proc_login,                 "proc_login",                 "%d",   "" ),
+        ( proc_none,                  "proc_none",                  "%d",   "" ),
+        ( proc_other,                 "proc_other",                 "%d",   "" ),
+        ( proc_preparing,             "proc_preparing",             "%d",   "" ),
+        ( proc_reading_from_net,      "proc_reading_from_net",      "%d",   "" ),
+        ( proc_sending_data,          "proc_sending_data",          "%d",   "" ),
+        ( proc_sorting_result,        "proc_sorting_result",        "%d",   "" ),
+        ( proc_statistics,            "proc_statistics",            "%d",   "" ),
+        ( proc_updating,              "proc_updating",              "%d",   "" ),
+        ( proc_writing_to_net,        "proc_writing_to_net",        "%d",   "" ),
+
+        # InnoDB Buffer Pool
+        ( innodb_buffer_pool_size,        "innodb_buffer_pool_size",        "%d",  "B" ),
+        ( innodb_buffer_pool_pages_total, "innodb_buffer_pool_pages_total", "%d",  "" ),
+        ( innodb_buffer_pool_pages_data,  "innodb_buffer_pool_pages_data",  "%d",  "" ),
+        ( innodb_buffer_pool_pages_free,  "innodb_buffer_pool_pages_free",  "%d",  "" ),
+        ( innodb_buffer_pool_pages_dirty, "innodb_buffer_pool_pages_dirty", "%d",  "" ),
+
+        # InnoDB Buffer Pool Activity
+        ( innodb_pages_created,       "innodb_pages_created",       "%.2f",  "" ),
+        ( innodb_pages_read,          "innodb_pages_read",          "%.2f",  "" ),
+        ( innodb_pages_written,       "innodb_pages_written",       "%.2f",  "" ),
+    
+        # InnoDB Buffer Pool Efficiency
+        ( innodb_buffer_pool_reads,         "innodb_buffer_pool_reads",         "%.2f",    "" ),
+        ( innodb_buffer_pool_read_requests, "innodb_buffer_pool_read_requests", "%.2f",    "" ),
+    
+        # InnoDB Checkpoint Age
+        ( uncheckpointed_bytes,       "uncheckpointed_bytes",       "%d",  "" ),
+    
+        # InnoDB Current Lock Waits
+        ( innodb_lock_wait_secs,      "innodb_lock_wait_secs",      "%d",   "" ),
+
+        # InnoDB Insert Buffer
+        ( ibuf_inserts,               "ibuf_inserts",               "%.2f", "" ),
+        ( ibuf_merged,                "ibuf_merged",                "%.2f", "" ),
+        ( ibuf_merges,                "ibuf_merges",                "%.2f", "" ),
+    
+        # InnoDB Insert Buffer Usage
+        ( ibuf_cell_count,            "ibuf_cell_count",            "%d",   "" ),
+        ( ibuf_used_cells,            "ibuf_used_cells",            "%d",   "" ),
+        ( ibuf_free_cells,            "ibuf_free_cells",            "%d",   "" ),
+    
+        # InnoDB IO
+        ( file_reads,                 "file_reads",                 "%.2f", "" ),
+        ( file_writes,                "file_writes",                "%.2f", "" ),
+        ( log_writes,                 "log_writes",                 "%.2f", "" ),
+        ( file_fsyncs,                "file_fsyncs",                "%.2f", "" ),
+    
+        # InnoDB IO Pending
+        ( pending_aio_log_ios,        "pending_aio_log_ios",        "%d",   "" ),
+        ( pending_aio_sync_ios,       "pending_aio_sync_ios",       "%d",   "" ),
+        ( pending_buf_pool_flushes,   "pending_buf_pool_flushes",   "%d",   "" ),
+        ( pending_chkp_writes,        "pending_chkp_writes",        "%d",   "" ),
+        ( pending_ibuf_aio_reads,     "pending_ibuf_aio_reads",     "%d",   "" ),
+        ( pending_log_flushes,        "pending_log_flushes",        "%d",   "" ),
+        ( pending_log_writes,         "pending_log_writes",         "%d",   "" ),
+        ( pending_normal_aio_reads,   "pending_normal_aio_reads",   "%d",   "" ),
+        ( pending_normal_aio_writes,  "pending_normal_aio_writes",  "%d",   "" ),
+    
+        # InnoDB Lock Structures
+        ( innodb_lock_structs,        "innodb_lock_structs",        "%d",   "" ),
+    
+        # InnoDB Log Activity
+        ( innodb_log_buffer_size,     "innodb_log_buffer_size",     "%d",   "" ),
+        ( log_bytes_written,          "log_bytes_written",          "%.2f", "" ),
+        ( log_bytes_flushed,          "log_bytes_flushed",          "%.2f", "" ),
+        ( unflushed_log,              "unflushed_log",              "%d",   "" ),
+
+        # InnoDB Memory Allocation
+        ( total_mem_alloc,            "total_mem_alloc",            "%d",   "" ),
+        ( additional_pool_alloc,      "additional_pool_alloc",      "%d",   "" ),
+
+        # InnoDB Row Lock Time
+        ( innodb_row_lock_time,       "innodb_row_lock_time",       "%.2f", "" ),
+    
+        # InnoDB Row Lock Waits
+        ( innodb_row_lock_waits,      "innodb_row_lock_waits",      "%.2f", "" ),
+    
+        # InnoDB Row Operations
+        ( innodb_rows_read,           "innodb_rows_read",           "%.2f", "" ),
+        ( innodb_rows_deleted,        "innodb_rows_deleted",        "%.2f", "" ),
+        ( innodb_rows_updated,        "innodb_rows_updated",        "%.2f", "" ),
+        ( innodb_rows_inserted,       "innodb_rows_inserted",       "%.2f", "" ),
+    
+        # InnoDB Semaphores
+
+        # InnoDB Semaphore Wait Time
+        ( innodb_sem_wait_time_ms,    "innodb_sem_wait_time_ms",    "%d",   "" ),
+    
+        # InnoDB Semaphore Waits
+        ( innodb_sem_waits,           "innodb_sem_waits",           "%d",   "" ),
+    
+        # InnoDB Tables In Use
+    
+        # InnoDB Transactions
+        ( innodb_transactions,        "innodb_transactions",        "%.2f", "" ),
+        ( history_list,               "history_list",               "%d",   "" ),
+    
+        # InnoDB Active/Locked Transactions
+        ( active_transactions,        "active_transactions",        "%d",   "" ),
+        ( locked_transactions,        "locked_transactions",        "%d",   "" ),
+        ( current_transactions,       "current_transactions",       "%d",   "" ),
+        ( read_views,                 "read_views",                 "%d",   "" ),
+    
+        # MyISAM Indexes
+        ( key_read_requests,          "key_read_requests",          "%.2f", "" ),
+        ( key_reads,                  "key_reads",                  "%.2f", "" ),
+        ( key_write_requests,         "key_write_requests",         "%.2f", "" ),
+        ( key_writes,                 "key_writes",                 "%.2f", "" ),
+    
+        # MyISAM Key Cache
+        ( key_buffer_size,            "key_buffer_size",            "%d",   "" ),
+        ( key_buf_bytes_used,         "key_buf_bytes_used",         "%d",   "" ),
+        ( key_buf_bytes_unflushed,    "key_buf_bytes_unflushed",    "%d",   "" ),
+    
+
+
+        ]:
+        #infos.append((format + " %s%s") % (value, what, unit))
+        warn, crit = None, None
+        perfdata.append((what, value, warn, crit))
+    if values["query_cache_type"] == "ON" and values["query_cache_size"] > 0:
+        for value, what, format, unit in [
+
+            ( qcache_queries,             "qcache_queries",             "%d",   "" ),
+            ( qcache_hits,                "qcache_hits",                "%.2f", "/s" ),
+            ( qcache_inserts,             "qcache_inserts",             "%.2f", "/s" ),
+            ( qcache_not_cached,          "qcache_not_cached",          "%.2f", "/s" ),
+            ( qcache_lowmem_prunes,       "qcache_lowmem_prunes",       "%.2f", "/s" ),
+
+            ( qcache_size,                "qcache_size",                "%d",    "B" ),
+            ( qcache_freemem,             "qcache_freemem",             "%d",    "B" ),
+            ( qcache_total_blocks,        "qcache_total_blocks",        "%d",    "" ),
+            ( qcache_free_blocks,         "qcache_free_blocks",         "%d",    "" ),    
+
+            ]:
+            perfdata.append((what, value, None, None))
+
+
+    #infotext = " - " + ", ".join(infos)
+    return (status, infotext, perfdata)
+
+check_info['mysql.performance'] = {
+    "check_function"          : check_mysql_performance,
+    "inventory_function"      : inventory_mysql_performance,
+    "service_description"     : "MySQL Performance Counters",
+    "has_perfdata"            : True,
+    "group"                   : "mysql_performance",
+}
+
+
